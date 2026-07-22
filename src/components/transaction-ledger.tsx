@@ -6,6 +6,7 @@ import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { toCents } from "@/lib/money";
 import type { TransactionListItem } from "@/lib/queries";
+import { defaultTransactionFilters, matchesTransaction, type TransactionFilters } from "@/lib/transaction-filters";
 import { TransactionRow } from "./transaction-row";
 
 type Category = { id: string; name: string; default_bucket: string; color_token: string };
@@ -33,21 +34,14 @@ export function TransactionLedger({ initialTransactions, categories, entities, a
   const [maximumAmount, setMaximumAmount] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
 
-  const filtered = useMemo(() => transactions.filter((transaction) => {
-    if (search && !transaction.merchant.toLowerCase().includes(search.toLowerCase())) return false;
-    if (categoryId === "uncategorized" && transaction.categoryId) return false;
-    if (categoryId !== "all" && categoryId !== "uncategorized" && transaction.categoryId !== categoryId) return false;
-    if (accountId !== "all" && transaction.accountId !== accountId) return false;
-    if (bucket !== "all" && transaction.bucket !== bucket) return false;
-    if (pendingOnly && !transaction.isPending) return false;
-    if (startDate && transaction.postedAt < startDate) return false;
-    if (endDate && transaction.postedAt > endDate) return false;
-    try {
-      if (minimumAmount && transaction.amountCents < toCents(minimumAmount)) return false;
-      if (maximumAmount && transaction.amountCents > toCents(maximumAmount)) return false;
-    } catch { return false; }
-    return true;
-  }), [transactions, search, categoryId, accountId, bucket, pendingOnly, startDate, endDate, minimumAmount, maximumAmount]);
+  const filters = useMemo<TransactionFilters>(() => ({
+    ...defaultTransactionFilters, search, startDate: startDate || null, endDate: endDate || null,
+    minimumAmountCents: (() => { try { return minimumAmount ? toCents(minimumAmount) : null; } catch { return Number.MAX_SAFE_INTEGER; } })(),
+    maximumAmountCents: (() => { try { return maximumAmount ? toCents(maximumAmount) : null; } catch { return Number.MIN_SAFE_INTEGER; } })(),
+    accountIds: accountId === "all" ? [] : [accountId], categoryIds: categoryId === "all" ? [] : [categoryId],
+    buckets: bucket === "all" ? [] : [bucket as TransactionFilters["buckets"][number]], pending: pendingOnly ? "only" : "include",
+  }), [search, startDate, endDate, minimumAmount, maximumAmount, accountId, categoryId, bucket, pendingOnly]);
+  const filtered = useMemo(() => transactions.filter((transaction) => matchesTransaction(transaction, filters)), [transactions, filters]);
 
   const virtualizer = useWindowVirtualizer({
     count: filtered.length,

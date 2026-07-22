@@ -31,6 +31,12 @@ async function initialize(db: D1Database) {
   if (!seeded) {
     await seedDatabase(db);
   }
+
+  // Keep the bundled demo coherent across local upgrades without touching user-imported rows.
+  await db.batch([
+    db.prepare("INSERT OR IGNORE INTO categories (id, name, parent_id, icon, color_token, default_bucket, sort_order) VALUES ('cat_contractors', 'Contractors', 'cat_wants', 'BriefcaseBusiness', 'category-4', 'want', 40)"),
+    db.prepare("UPDATE transactions SET category_id = 'cat_contractors' WHERE id = 'txn_contract' AND source = 'demo' AND category_id = 'cat_other_income'"),
+  ]);
 }
 
 export async function ensureDatabase() {

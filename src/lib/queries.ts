@@ -1,4 +1,6 @@
 import { ensureDatabase, getDatabase } from "@/db/runtime";
+import { decimalCents, type ExportRow, type ExportTotals } from "@/lib/exporter";
+import type { TransactionFilters } from "@/lib/transaction-filters";
 
 export type Scope = "all" | "personal" | "business";
 
@@ -241,15 +243,74 @@ export async function getBudgetData(month: string, scope: Scope = "personal") {
   };
 }
 
+export async function getBudgetEditorData(month: string, scope: Scope = "personal") {
+  await ensureDatabase();
+  const { start, end } = monthBounds(month);
+  const scoped = scopeSql(scope, "entity_id");
+  const [budget, categoriesResult] = await Promise.all([
+    getBudgetData(month, scope),
+    getDatabase().prepare(`${EFFECTIVE_TRANSACTIONS}, actuals AS (
+        SELECT category_id, COALESCE(-SUM(amount_cents), 0) AS spent_cents
+        FROM effective_transactions
+        WHERE posted_at >= ? AND posted_at < ? AND is_pending = 0
+          AND bucket NOT IN ('transfer', 'ignore', 'income') AND ${scoped.clause}
+        GROUP BY category_id
+      )
+      SELECT c.id, c.name, c.color_token, c.default_bucket,
+        COALESCE(a.spent_cents, 0) AS spent_cents
+      FROM categories c LEFT JOIN actuals a ON a.category_id = c.id
+      WHERE c.parent_id IS NOT NULL AND c.is_archived = 0
+        AND c.default_bucket IN ('need', 'want', 'save')
+      ORDER BY c.sort_order`)
+      .bind(start, end, ...scoped.values)
+      .all<Record<string, unknown>>(),
+  ]);
+  const budgetByCategory = new Map(budget.lines.map((line) => [line.categoryId, line]));
+  return {
+    totalCents: budget.totalCents,
+    lines: categoriesResult.results.map((category) => {
+      const line = budgetByCategory.get(String(category.id));
+      return {
+        id: line?.id ?? null,
+        categoryId: String(category.id),
+        name: String(category.name),
+        colorToken: String(category.color_token),
+        bucket: String(category.default_bucket),
+        amountCents: line?.amountCents ?? 0,
+        spentCents: Number(category.spent_cents),
+        rolloverEnabled: line?.rolloverEnabled ?? false,
+        rolloverCents: line?.rolloverCents ?? 0,
+      };
+    }),
+  };
+}
+
 export async function getInsightData(month: string, scope: Scope) {
   const home = await getHomeData(month, scope);
-  const recurring = await getDatabase()
-    .prepare("SELECT merchant_key, avg_amount_cents, cadence, status, next_expected_at FROM recurring ORDER BY avg_amount_cents ASC")
-    .all<Record<string, unknown>>();
-  const insights = await getDatabase()
-    .prepare("SELECT kind, title, body, model, created_at FROM insights WHERE month = ? AND dismissed_at IS NULL ORDER BY created_at DESC")
-    .bind(`${month}-01`)
-    .all<Record<string, unknown>>();
+  const end = monthBounds(month).end;
+  const [year, monthNumber] = month.split("-").map(Number);
+  const twelveMonthStart = new Date(Date.UTC(year, monthNumber - 12, 1)).toISOString().slice(0, 10);
+  const sixMonthStart = new Date(Date.UTC(year, monthNumber - 6, 1)).toISOString().slice(0, 10);
+  const scoped = scopeSql(scope, "entity_id");
+  const [recurring, insights, cashFlow, categorySpend] = await Promise.all([
+    getDatabase().prepare("SELECT merchant_key, avg_amount_cents, cadence, status, next_expected_at FROM recurring ORDER BY avg_amount_cents ASC").all<Record<string, unknown>>(),
+    getDatabase().prepare("SELECT kind, title, body, model, created_at FROM insights WHERE month = ? AND dismissed_at IS NULL ORDER BY created_at DESC").bind(`${month}-01`).all<Record<string, unknown>>(),
+    getDatabase().prepare(`${EFFECTIVE_TRANSACTIONS} SELECT substr(posted_at, 1, 7) AS month,
+      COALESCE(SUM(CASE WHEN bucket = 'income' AND amount_cents > 0 THEN amount_cents ELSE 0 END), 0) AS income_cents,
+      COALESCE(-SUM(CASE WHEN bucket IN ('need', 'want') THEN amount_cents ELSE 0 END), 0) AS spend_cents,
+      COALESCE(SUM(amount_cents), 0) AS net_cents
+      FROM effective_transactions WHERE posted_at >= ? AND posted_at < ? AND is_pending = 0
+      AND bucket NOT IN ('transfer', 'ignore') AND ${scoped.clause}
+      GROUP BY substr(posted_at, 1, 7) ORDER BY month`).bind(twelveMonthStart, end, ...scoped.values).all<Record<string, unknown>>(),
+    getDatabase().prepare(`${EFFECTIVE_TRANSACTIONS} SELECT substr(et.posted_at, 1, 7) AS month,
+      COALESCE(c.name, 'Uncategorized') AS category, COALESCE(c.color_token, 'category-8') AS color_token,
+      COALESCE(-SUM(et.amount_cents), 0) AS spent_cents
+      FROM effective_transactions et LEFT JOIN categories c ON c.id = et.category_id
+      WHERE et.posted_at >= ? AND et.posted_at < ? AND et.is_pending = 0
+      AND et.bucket IN ('need', 'want') AND ${scopeSql(scope, "et.entity_id").clause}
+      GROUP BY substr(et.posted_at, 1, 7), c.id, c.name, c.color_token HAVING spent_cents > 0
+      ORDER BY month, spent_cents DESC`).bind(sixMonthStart, end, ...scopeSql(scope, "et.entity_id").values).all<Record<string, unknown>>(),
+  ]);
   return {
     ...home,
     recurring: recurring.results.map((row) => ({
@@ -266,7 +327,119 @@ export async function getInsightData(month: string, scope: Scope) {
       model: String(row.model),
       createdAt: Number(row.created_at),
     })),
+    cashFlow: cashFlow.results.map((row) => ({ month: String(row.month), incomeCents: Number(row.income_cents), spendCents: Number(row.spend_cents), netCents: Number(row.net_cents) })),
+    categorySpend: categorySpend.results.map((row) => ({ month: String(row.month), category: String(row.category), colorToken: String(row.color_token), spentCents: Number(row.spent_cents) })),
   };
+}
+
+export async function getBusinessData(year: string, quarter = "all") {
+  await ensureDatabase();
+  const quarterNumber = quarter.match(/^q([1-4])$/i)?.[1];
+  const startMonth = quarterNumber ? (Number(quarterNumber) - 1) * 3 + 1 : 1;
+  const endMonth = quarterNumber ? startMonth + 3 : 13;
+  const start = `${year}-${String(startMonth).padStart(2, "0")}-01`;
+  const end = endMonth === 13 ? `${Number(year) + 1}-01-01` : `${year}-${String(endMonth).padStart(2, "0")}-01`;
+  const effective = `WITH business_effective AS (
+    SELECT t.id, t.posted_at, t.amount_cents, t.bucket, t.entity_id,
+      t.income_source_id, t.tax_category_id, t.deductible_pct, t.is_pending, t.is_transfer
+    FROM transactions t WHERE NOT EXISTS (SELECT 1 FROM transaction_splits s WHERE s.transaction_id = t.id)
+    UNION ALL
+    SELECT t.id, t.posted_at, s.amount_cents, COALESCE(c.default_bucket, t.bucket), s.entity_id,
+      t.income_source_id, s.tax_category_id, s.deductible_pct, t.is_pending, t.is_transfer
+    FROM transaction_splits s JOIN transactions t ON t.id = s.transaction_id
+    LEFT JOIN categories c ON c.id = s.category_id
+  )`;
+  const [totals, revenue, expenses, monthly, entity] = await Promise.all([
+    getDatabase().prepare(`${effective} SELECT
+      COALESCE(SUM(CASE WHEN amount_cents > 0 THEN amount_cents ELSE 0 END), 0) AS revenue_cents,
+      COALESCE(-SUM(CASE WHEN amount_cents < 0 THEN amount_cents ELSE 0 END), 0) AS expense_cents
+      FROM business_effective WHERE entity_id = 'entity_business' AND posted_at >= ? AND posted_at < ?
+      AND is_pending = 0 AND is_transfer = 0 AND bucket NOT IN ('transfer', 'ignore')`).bind(start, end).first<{ revenue_cents: number; expense_cents: number }>(),
+    getDatabase().prepare(`${effective} SELECT COALESCE(i.name, 'Other business income') AS name, SUM(b.amount_cents) AS amount_cents
+      FROM business_effective b LEFT JOIN income_sources i ON i.id = b.income_source_id
+      WHERE b.entity_id = 'entity_business' AND b.posted_at >= ? AND b.posted_at < ? AND b.amount_cents > 0
+      AND b.is_pending = 0 AND b.is_transfer = 0 AND b.bucket NOT IN ('transfer', 'ignore')
+      GROUP BY i.id, i.name ORDER BY amount_cents DESC`).bind(start, end).all<Record<string, unknown>>(),
+    getDatabase().prepare(`${effective} SELECT COALESCE(tc.label, 'Unassigned') AS label,
+      tc.schedule_c_line, -SUM(b.amount_cents) AS amount_cents,
+      -SUM(CAST(b.amount_cents * b.deductible_pct AS INTEGER) / 100) AS deductible_cents
+      FROM business_effective b LEFT JOIN tax_categories tc ON tc.id = b.tax_category_id
+      WHERE b.entity_id = 'entity_business' AND b.posted_at >= ? AND b.posted_at < ? AND b.amount_cents < 0
+      AND b.is_pending = 0 AND b.is_transfer = 0 AND b.bucket NOT IN ('transfer', 'ignore')
+      GROUP BY tc.id, tc.label, tc.schedule_c_line ORDER BY amount_cents DESC`).bind(start, end).all<Record<string, unknown>>(),
+    getDatabase().prepare(`${effective} SELECT substr(posted_at, 1, 7) AS month,
+      COALESCE(SUM(CASE WHEN amount_cents > 0 THEN amount_cents ELSE 0 END), 0) AS revenue_cents,
+      COALESCE(-SUM(CASE WHEN amount_cents < 0 THEN amount_cents ELSE 0 END), 0) AS expense_cents
+      FROM business_effective WHERE entity_id = 'entity_business' AND posted_at >= ? AND posted_at < ?
+      AND is_pending = 0 AND is_transfer = 0 AND bucket NOT IN ('transfer', 'ignore')
+      GROUP BY substr(posted_at, 1, 7) ORDER BY month`).bind(start, end).all<Record<string, unknown>>(),
+    getDatabase().prepare("SELECT name, set_aside_pct FROM entities WHERE id = 'entity_business' AND is_active = 1").first<{ name: string; set_aside_pct: number }>(),
+  ]);
+  const revenueCents = totals?.revenue_cents ?? 0;
+  const expenseCents = totals?.expense_cents ?? 0;
+  return {
+    start, end, entityName: entity?.name ?? "Business", setAsidePct: entity?.set_aside_pct ?? 0,
+    revenueCents, expenseCents, profitCents: revenueCents - expenseCents,
+    reserveCents: Math.round((revenueCents * (entity?.set_aside_pct ?? 0)) / 100),
+    revenue: revenue.results.map((row) => ({ name: String(row.name), amountCents: Number(row.amount_cents) })),
+    expenses: expenses.results.map((row) => ({ label: String(row.label), scheduleCLine: row.schedule_c_line ? String(row.schedule_c_line) : null, amountCents: Number(row.amount_cents), deductibleCents: Number(row.deductible_cents) })),
+    monthly: monthly.results.map((row) => ({ month: String(row.month), revenueCents: Number(row.revenue_cents), expenseCents: Number(row.expense_cents) })),
+  };
+}
+
+export async function getExportData(filters: TransactionFilters) {
+  await ensureDatabase();
+  const clauses: string[] = ["1 = 1"];
+  const values: unknown[] = [];
+  const addList = (column: string, items: string[]) => {
+    if (!items.length) return;
+    clauses.push(`${column} IN (${items.map(() => "?").join(",")})`);
+    values.push(...items);
+  };
+  if (filters.search) { clauses.push("UPPER(COALESCE(t.merchant_clean, t.description_raw)) LIKE ?"); values.push(`%${filters.search.toUpperCase()}%`); }
+  if (filters.startDate) { clauses.push("t.posted_at >= ?"); values.push(filters.startDate); }
+  if (filters.endDate) { clauses.push("t.posted_at <= ?"); values.push(filters.endDate); }
+  if (filters.minimumAmountCents !== null) { clauses.push("t.amount_cents >= ?"); values.push(filters.minimumAmountCents); }
+  if (filters.maximumAmountCents !== null) { clauses.push("t.amount_cents <= ?"); values.push(filters.maximumAmountCents); }
+  addList("t.account_id", filters.accountIds); addList("t.entity_id", filters.entityIds); addList("t.bucket", filters.buckets);
+  if (filters.categoryIds.length) {
+    const categoryIds = filters.categoryIds.filter((id) => id !== "uncategorized");
+    const includesEmpty = filters.categoryIds.includes("uncategorized");
+    if (includesEmpty && categoryIds.length) {
+      clauses.push(`(t.category_id IS NULL OR t.category_id IN (${categoryIds.map(() => "?").join(",")}))`); values.push(...categoryIds);
+    } else if (includesEmpty) clauses.push("t.category_id IS NULL");
+    else addList("t.category_id", categoryIds);
+  }
+  if (filters.pending === "exclude") clauses.push("t.is_pending = 0"); else if (filters.pending === "only") clauses.push("t.is_pending = 1");
+  if (filters.transfers === "exclude") clauses.push("t.is_transfer = 0"); else if (filters.transfers === "only") clauses.push("t.is_transfer = 1");
+  if (filters.ignored === "exclude") clauses.push("(t.bucket IS NULL OR t.bucket != 'ignore')");
+  const result = await getDatabase().prepare(`SELECT t.id, t.authorized_at, t.posted_at, t.amount_cents,
+      a.name AS account, a.type AS account_type, a.currency,
+      COALESCE(t.merchant_clean, t.description_raw) AS merchant, t.description_raw,
+      c.name AS category, pc.name AS parent_category, t.bucket, e.name AS entity,
+      i.name AS income_source, t.counterparty, tc.label AS tax_category, tc.schedule_c_line,
+      t.deductible_pct, t.is_transfer, t.is_pending, t.is_split_parent, t.parent_transaction_id,
+      t.notes, t.tags, t.category_source
+    FROM transactions t JOIN accounts a ON a.id = t.account_id
+    LEFT JOIN categories c ON c.id = t.category_id LEFT JOIN categories pc ON pc.id = c.parent_id
+    JOIN entities e ON e.id = t.entity_id LEFT JOIN income_sources i ON i.id = t.income_source_id
+    LEFT JOIN tax_categories tc ON tc.id = t.tax_category_id
+    WHERE ${clauses.join(" AND ")} ORDER BY t.posted_at, t.created_at`)
+    .bind(...values).all<Record<string, unknown>>();
+  let inflowsCents = 0; let outflowsCents = 0;
+  const rows = result.results.map((record) => {
+    const amountCents = Number(record.amount_cents);
+    if (amountCents >= 0) inflowsCents += amountCents; else outflowsCents += amountCents;
+    const deductiblePct = Number(record.deductible_pct);
+    const row: ExportRow = {
+      date: String(record.authorized_at ?? record.posted_at), posted_date: String(record.posted_at), account: String(record.account), account_type: String(record.account_type), merchant: String(record.merchant), description: String(record.description_raw),
+      amount: decimalCents(amountCents), currency: String(record.currency), category: record.category ? String(record.category) : "", parent_category: record.parent_category ? String(record.parent_category) : "", bucket: record.bucket ? String(record.bucket) : "", entity: String(record.entity), income_source: record.income_source ? String(record.income_source) : "", counterparty: record.counterparty ? String(record.counterparty) : "", tax_category: record.tax_category ? String(record.tax_category) : "", schedule_c_line: record.schedule_c_line ? String(record.schedule_c_line) : "",
+      deductible_pct: deductiblePct, deductible_amount: decimalCents(Math.trunc((amountCents * deductiblePct) / 100)), is_transfer: Boolean(record.is_transfer), is_pending: Boolean(record.is_pending), is_split: Boolean(record.is_split_parent), split_of: record.parent_transaction_id ? String(record.parent_transaction_id) : "", notes: record.notes ? String(record.notes) : "", tags: typeof record.tags === "string" ? (JSON.parse(record.tags) as string[]).join("|") : "", category_source: record.category_source ? String(record.category_source) : "", transaction_id: String(record.id),
+    };
+    return row;
+  });
+  const totals: ExportTotals = { count: rows.length, inflowsCents, outflowsCents, netCents: inflowsCents + outflowsCents };
+  return { rows, totals, startDate: rows[0]?.posted_date ? String(rows[0].posted_date) : null, endDate: rows.at(-1)?.posted_date ? String(rows.at(-1)?.posted_date) : null };
 }
 
 export async function getSettingsData() {

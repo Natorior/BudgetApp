@@ -1,35 +1,22 @@
 import type { Metadata } from "next";
-import { ChevronLeft, ChevronRight } from "lucide-react";
-import { PaceBar } from "@/components/pace-bar";
+import { BudgetEditor } from "@/components/budget-editor";
 import { PageHeader } from "@/components/page-header";
-import { formatCents, sumCents } from "@/lib/money";
-import { getBudgetData } from "@/lib/queries";
+import { getBudgetEditorData, getHomeData } from "@/lib/queries";
 
 export const metadata: Metadata = { title: "Budget" };
 
-export default async function BudgetPage() {
-  const now = new Date();
-  const month = now.toISOString().slice(0, 7);
-  const label = now.toLocaleDateString("en-US", { month: "long", year: "numeric" });
-  const elapsed = Math.round((now.getDate() * 100) / new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate());
-  const budget = await getBudgetData(month, "personal");
-  const allocated = sumCents(budget.lines.map((line) => line.amountCents));
-  const unallocated = budget.totalCents === null ? null : budget.totalCents - allocated;
+function shiftMonth(month: string, delta: number) {
+  const [year, value] = month.split("-").map(Number);
+  return new Date(Date.UTC(year, value - 1 + delta, 1)).toISOString().slice(0, 7);
+}
 
-  return (
-    <>
-      <PageHeader title="Budget" />
-      <div className="month-picker"><button className="icon-button" aria-label="Previous month"><ChevronLeft /></button><span>{label}</span><button className="icon-button" aria-label="Next month"><ChevronRight /></button></div>
-      <section className="hero-section compact">
-        <p className="section-label">Monthly total</p>
-        <p className="money section-number">{budget.totalCents === null ? "—" : formatCents(budget.totalCents, { hideZeroCents: true })}</p>
-        <div className="allocation-track"><span style={{ width: `${budget.totalCents ? Math.min(100, Math.round((allocated * 100) / budget.totalCents)) : 0}%` }} /></div>
-        <div className="allocation-caption"><span>{formatCents(allocated, { hideZeroCents: true })} allocated</span><span data-over={unallocated !== null && unallocated < 0 || undefined}>{unallocated === null ? "No budget" : unallocated < 0 ? `${formatCents(-unallocated, { hideZeroCents: true })} over-allocated` : `${formatCents(unallocated, { hideZeroCents: true })} unallocated`}</span></div>
-      </section>
-      <section className="statement-section budget-lines">
-        <div className="section-heading"><h2>Categories</h2><span>{elapsed}% through month</span></div>
-        {budget.lines.map((line) => <PaceBar key={line.id} name={line.name} spentCents={line.spentCents} budgetCents={line.amountCents} elapsedPercent={elapsed} colorToken={line.colorToken} />)}
-      </section>
-    </>
-  );
+export default async function BudgetPage({ searchParams }: { searchParams: Promise<{ month?: string }> }) {
+  const requested = (await searchParams).month;
+  const currentMonth = new Date().toISOString().slice(0, 7);
+  const month = requested && /^\d{4}-\d{2}$/.test(requested) ? requested : currentMonth;
+  const date = new Date(`${month}-02T12:00:00Z`);
+  const days = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).getUTCDate();
+  const elapsed = month === currentMonth ? Math.round((new Date().getDate() * 100) / days) : month < currentMonth ? 100 : 0;
+  const [budget, previous, home] = await Promise.all([getBudgetEditorData(month, "personal"), getBudgetEditorData(shiftMonth(month, -1), "personal"), getHomeData(month, "personal")]);
+  return <><PageHeader title="Budget" /><BudgetEditor month={month} initialBudget={budget} previousBudget={previous} incomeCents={home.totals.incomeCents} spendCents={home.totals.spendCents} elapsedPercent={elapsed} /></>;
 }

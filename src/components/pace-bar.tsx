@@ -2,7 +2,7 @@ import { formatCents } from "@/lib/money";
 
 function ratio(value: number, total: number) {
   if (total <= 0) return null;
-  return Math.round((value * 100) / total);
+  return Math.max(0, Math.round((value * 100) / total));
 }
 
 export function PaceBar({ name, spentCents, budgetCents, elapsedPercent, colorToken }: {

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { MonthRail } from "@/components/month-rail";
+import { InsightsCharts } from "@/components/insights-charts";
 import { PageHeader } from "@/components/page-header";
 import { ScopeSwitcher } from "@/components/scope-switcher";
 import { formatCents, sumCents } from "@/lib/money";
@@ -20,6 +21,7 @@ export default async function InsightsPage({ searchParams }: { searchParams: Pro
     <>
       <PageHeader title="Insights"><ScopeSwitcher value={scope} /></PageHeader>
       <MonthRail monthLabel={now.toLocaleDateString("en-US", { month: "long" })} day={now.getDate()} daysInMonth={days} incomeCents={data.totals.incomeCents} spendCents={data.totals.spendCents} budgetCents={scope === "business" ? null : data.budgetCents} />
+      <InsightsCharts cashFlow={data.cashFlow} categorySpend={data.categorySpend} />
       <section className="statement-section">
         <div className="section-heading"><h2>Recurring</h2><span className="money">{formatCents(recurringMonthly, { hideZeroCents: true })}/mo</span></div>
         {data.recurring.map((item) => <div className="account-row" key={item.merchant}><span><strong>{item.merchant}</strong><small>{item.cadence} · next {item.nextExpectedAt ?? "—"}</small></span><span className="money">{formatCents(item.amountCents)}</span></div>)}

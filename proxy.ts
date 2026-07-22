@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { sessionCookie, verifySessionToken } from "@/lib/auth/session";
 
-const publicPaths = new Set(["/login", "/api/auth/login"]);
+const publicPaths = new Set(["/login", "/api/auth/login", "/manifest.webmanifest", "/sw.js", "/favicon.svg", "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png", "/og-ledger.png"]);
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -23,5 +23,5 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.svg|manifest.webmanifest|icons/).*)"],
+  matcher: ["/((?!_next/static|_next/image|favicon.svg|manifest.webmanifest|sw.js|icon-192.png|icon-512.png|apple-touch-icon.png|og-ledger.png).*)"],
 };
