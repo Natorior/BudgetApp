@@ -44,7 +44,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ s
       <MonthRail monthLabel={calendar.label} day={calendar.day} daysInMonth={calendar.days} incomeCents={data.totals.incomeCents} spendCents={data.totals.spendCents} budgetCents={scope === "business" ? null : data.budgetCents} />
 
       {data.reviewCount > 0 ? (
-        <Link className="review-link" href="/transactions?review=1"><span>{data.reviewCount} to review</span><ArrowRight size={18} aria-hidden="true" /></Link>
+        <Link className="review-link" href="/transactions/review"><span>{data.reviewCount} to review</span><ArrowRight size={18} aria-hidden="true" /></Link>
       ) : null}
 
       <section className="statement-section">
@@ -62,7 +62,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ s
 
       <section className="statement-section recent-section">
         <div className="section-heading"><h2>Recent</h2><Link href="/transactions">View all</Link></div>
-        <div className="transaction-list">{data.recent.map((transaction) => <TransactionRow key={transaction.id} transaction={transaction} />)}</div>
+        <div className="transaction-list">{data.recent.map((transaction) => <TransactionRow key={transaction.id} transaction={transaction} href={`/transactions/${transaction.id}`} />)}</div>
       </section>
       <p className="demo-note">Demo data · replace it by importing a bank CSV in Settings.</p>
     </>

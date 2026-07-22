@@ -18,8 +18,8 @@ export default async function SettingsPage() {
       </section>
       <section className="settings-group">
         <p className="eyebrow">Organize</p>
-        <button className="settings-row"><Shapes /><span><strong>Categories</strong><small>{data.categories.length} active categories</small></span><ArrowRight /></button>
-        <button className="settings-row"><Tags /><span><strong>Entities</strong><small>{data.entities.length} scopes</small></span><ArrowRight /></button>
+        <Link className="settings-row" href="/settings/categories"><Shapes /><span><strong>Categories</strong><small>{data.categories.length} active categories</small></span><ArrowRight /></Link>
+        <Link className="settings-row" href="/settings/rules"><Tags /><span><strong>Rules</strong><small>Automate repeat merchants</small></span><ArrowRight /></Link>
       </section>
       <section className="settings-group">
         <p className="eyebrow">Connections</p>

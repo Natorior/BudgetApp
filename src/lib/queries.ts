@@ -12,6 +12,8 @@ export type TransactionListItem = {
   bucket: string | null;
   entity: string;
   entityId: string;
+  accountId: string;
+  accountName: string;
   isPending: boolean;
   isTransfer: boolean;
   isSelected?: boolean;
@@ -109,11 +111,14 @@ export async function getHomeData(month: string, scope: Scope) {
         t.bucket,
         e.name AS entity,
         t.entity_id,
+        t.account_id,
+        a.name AS account_name,
         t.is_pending,
         t.is_transfer
       FROM transactions t
       LEFT JOIN categories c ON c.id = t.category_id
       JOIN entities e ON e.id = t.entity_id
+      JOIN accounts a ON a.id = t.account_id
       WHERE ${scopeSql(scope, "t.entity_id").clause}
       ORDER BY t.posted_at DESC, t.created_at DESC
       LIMIT 6`)
@@ -149,6 +154,8 @@ function mapTransaction(row: Record<string, unknown>): TransactionListItem {
     bucket: row.bucket ? String(row.bucket) : null,
     entity: String(row.entity),
     entityId: String(row.entity_id),
+    accountId: row.account_id ? String(row.account_id) : "",
+    accountName: row.account_name ? String(row.account_name) : "",
     isPending: Boolean(row.is_pending),
     isTransfer: Boolean(row.is_transfer),
   };
@@ -173,14 +180,17 @@ export async function getTransactions(scope: Scope, search = "") {
         t.bucket,
         e.name AS entity,
         t.entity_id,
+        t.account_id,
+        a.name AS account_name,
         t.is_pending,
         t.is_transfer
       FROM transactions t
       LEFT JOIN categories c ON c.id = t.category_id
       JOIN entities e ON e.id = t.entity_id
+      JOIN accounts a ON a.id = t.account_id
       WHERE ${scoped.clause} ${searched}
       ORDER BY t.posted_at DESC, t.created_at DESC
-      LIMIT 250`)
+      LIMIT 5000`)
     .bind(...values)
     .all<Record<string, unknown>>();
   return result.results.map(mapTransaction);
@@ -271,4 +281,115 @@ export async function getSettingsData() {
     categories: categories.results,
     entities: entities.results,
   };
+}
+
+export async function getCategorySettingsData() {
+  await ensureDatabase();
+  const result = await getDatabase()
+    .prepare(`SELECT id, name, default_bucket, color_token, is_archived
+      FROM categories WHERE parent_id IS NOT NULL
+      ORDER BY is_archived, sort_order, name`)
+    .all<{ id: string; name: string; default_bucket: string; color_token: string; is_archived: number }>();
+  return result.results;
+}
+
+export async function getRuleSettingsData() {
+  await ensureDatabase();
+  const [rulesResult, options] = await Promise.all([
+    getDatabase().prepare(`SELECT r.id, r.name, r.priority, r.enabled, r.match_field, r.match_op,
+      r.match_value, r.set_category_id, r.set_bucket, r.set_entity_id,
+      c.name AS category_name, e.name AS entity_name
+      FROM rules r
+      LEFT JOIN categories c ON c.id = r.set_category_id
+      LEFT JOIN entities e ON e.id = r.set_entity_id
+      ORDER BY r.priority, r.created_at`).all<Record<string, unknown>>(),
+    getEditorOptions(),
+  ]);
+  return { rules: rulesResult.results, ...options };
+}
+
+export async function getImportAccounts() {
+  await ensureDatabase();
+  const result = await getDatabase()
+    .prepare("SELECT id, name, type FROM accounts WHERE is_active = 1 AND type != 'investment' ORDER BY sort_order")
+    .all<{ id: string; name: string; type: string }>();
+  return result.results;
+}
+
+export async function getEditorOptions() {
+  await ensureDatabase();
+  const [categories, entities, accounts] = await Promise.all([
+    getDatabase().prepare("SELECT id, name, default_bucket, color_token FROM categories WHERE parent_id IS NOT NULL AND is_archived = 0 ORDER BY sort_order").all<{ id: string; name: string; default_bucket: string; color_token: string }>(),
+    getDatabase().prepare("SELECT id, name, kind FROM entities WHERE is_active = 1 ORDER BY sort_order").all<{ id: string; name: string; kind: string }>(),
+    getDatabase().prepare("SELECT id, name FROM accounts WHERE is_active = 1 ORDER BY sort_order").all<{ id: string; name: string }>(),
+  ]);
+  return { categories: categories.results, entities: entities.results, accounts: accounts.results };
+}
+
+export async function getTransactionDetail(id: string) {
+  await ensureDatabase();
+  const transaction = await getDatabase()
+    .prepare(`SELECT
+      t.*, a.name AS account_name, c.name AS category_name, e.name AS entity_name
+      FROM transactions t
+      JOIN accounts a ON a.id = t.account_id
+      LEFT JOIN categories c ON c.id = t.category_id
+      JOIN entities e ON e.id = t.entity_id
+      WHERE t.id = ?`)
+    .bind(id)
+    .first<Record<string, unknown>>();
+  if (!transaction) return null;
+  const splits = await getDatabase()
+    .prepare("SELECT id, amount_cents, category_id, entity_id, tax_category_id, deductible_pct, note FROM transaction_splits WHERE transaction_id = ? ORDER BY rowid")
+    .bind(id)
+    .all<Record<string, unknown>>();
+  return {
+    id: String(transaction.id),
+    accountName: String(transaction.account_name),
+    merchant: String(transaction.merchant_clean ?? transaction.description_raw),
+    descriptionRaw: String(transaction.description_raw),
+    postedAt: String(transaction.posted_at),
+    amountCents: Number(transaction.amount_cents),
+    categoryId: transaction.category_id ? String(transaction.category_id) : null,
+    bucket: transaction.bucket ? String(transaction.bucket) : null,
+    entityId: String(transaction.entity_id),
+    notes: transaction.notes ? String(transaction.notes) : "",
+    tags: typeof transaction.tags === "string" ? JSON.parse(transaction.tags) as string[] : [],
+    isPending: Boolean(transaction.is_pending),
+    isTransfer: Boolean(transaction.is_transfer),
+    userLocked: Boolean(transaction.user_locked),
+    splits: splits.results.map((split) => ({
+      id: String(split.id),
+      amountCents: Number(split.amount_cents),
+      categoryId: split.category_id ? String(split.category_id) : null,
+      entityId: String(split.entity_id),
+      taxCategoryId: split.tax_category_id ? String(split.tax_category_id) : null,
+      deductiblePct: Number(split.deductible_pct),
+      note: split.note ? String(split.note) : "",
+    })),
+  };
+}
+
+export async function getReviewQueue(scope: Scope = "all") {
+  await ensureDatabase();
+  const scoped = scopeSql(scope, "t.entity_id");
+  const result = await getDatabase()
+    .prepare(`SELECT
+      t.id, COALESCE(t.merchant_clean, t.description_raw) AS merchant,
+      t.description_raw, t.posted_at, t.amount_cents, t.account_id,
+      a.name AS account_name, t.category_id, t.bucket, t.entity_id,
+      e.name AS entity, t.is_pending, t.is_transfer
+      FROM transactions t
+      JOIN accounts a ON a.id = t.account_id
+      JOIN entities e ON e.id = t.entity_id
+      WHERE (t.category_id IS NULL OR t.ai_confidence < 85)
+        AND ${scoped.clause}
+      ORDER BY t.posted_at DESC`)
+    .bind(...scoped.values)
+    .all<Record<string, unknown>>();
+  return result.results.map((row) => ({
+    ...mapTransaction({ ...row, category: null }),
+    descriptionRaw: String(row.description_raw),
+    accountName: String(row.account_name),
+  }));
 }
