@@ -13,10 +13,18 @@ the numbered planning documents at the repository root.
 ```bash
 npm install
 npm run dev
-npm run build
 ```
 
-This starter does not use `wrangler.jsonc`.
+Open `http://localhost:3000` in your browser. The frontend, API routes, and
+local D1 database all run through the same local development server.
+
+Before starting for the first time, copy `.env.example` to `.env.local` and
+set your own `APP_PASSCODE` and a random `SESSION_SECRET` of at least 32
+characters. `.env.local` is ignored by Git.
+
+This repository is intentionally detached from a hosted Sites project. Run
+`npm run build` to verify a production build when you are ready to configure
+your own deployment.
 
 ## Repository shape
 
